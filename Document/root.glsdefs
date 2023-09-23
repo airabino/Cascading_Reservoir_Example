@@ -1,0 +1,56 @@
+\glsdefs@newdocentry{chrp}%
+{%
+name={\acronymfont {\glsentryshort {chrp}}},%
+sort={CHRP},%
+type={acronym},%
+first={CHRP},%
+firstplural={CHRPs},%
+text={CHRP},%
+plural={CHRPs},%
+description={Cascading Hydroelectric Reservoir Problem},%
+descriptionplural={Cascading Hydroelectric Reservoir Problem},%
+symbol={\relax },%
+symbolplural={\relax },%
+user1={},%
+user2={},%
+user3={},%
+user4={},%
+user5={},%
+user6={},%
+long={Cascading Hydroelectric Reservoir Problem},%
+longplural={Cascading Hydroelectric Reservoir Problems},%
+short={CHRP},%
+shortplural={CHRPs},%
+counter={page},%
+parent={},%
+%
+}%
+
+\glsdefs@newdocentry{schrp}%
+{%
+name={\acronymfont {\glsentryshort {schrp}}},%
+sort={S-CHRP},%
+type={acronym},%
+first={S-CHRP},%
+firstplural={S-CHRPs},%
+text={S-CHRP},%
+plural={S-CHRPs},%
+description={Stochastic Cascading Hydroelectric Reservoir Problem},%
+descriptionplural={Stochastic Cascading Hydroelectric Reservoir Problem},%
+symbol={\relax },%
+symbolplural={\relax },%
+user1={},%
+user2={},%
+user3={},%
+user4={},%
+user5={},%
+user6={},%
+long={Stochastic Cascading Hydroelectric Reservoir Problem},%
+longplural={Stochastic Cascading Hydroelectric Reservoir Problems},%
+short={S-CHRP},%
+shortplural={S-CHRPs},%
+counter={page},%
+parent={},%
+%
+}%
+
