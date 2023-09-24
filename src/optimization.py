@@ -47,11 +47,14 @@ def CHRP_Objective(model,inputs):
 	pumping_cost=sum(
 		inputs['c_p'][r,t]*model.u_p[r,t] for r in model.R for t in model.T)
 
-	transmission_cost=sum(
-		inputs['c_t'][t]*model.u_t[t] for t in model.T)
+	transmission_purchase_cost=sum(
+		inputs['c_tp'][t]*model.u_tp[t] for t in model.T)
+
+	transmission_sell_cost=sum(
+		inputs['c_ts'][t]*model.u_ts[t] for t in model.T)
 
 	model.objective=pyomo.Objective(
-		expr=generation_cost+pumping_cost+transmission_cost)
+		expr=generation_cost+pumping_cost+transmission_purchase_cost+transmission_sell_cost)
 
 	return model
 
@@ -63,14 +66,20 @@ def CHRP_COE(model,inputs):
 	pumping_power=sum(
 		model.u_g[r,t] for r in model.R for t in model.T)
 
-	transmission_power=sum(
-		model.u_t[t] for t in model.T)
+	transmission_purchase_power=sum(
+		model.u_tp[t] for t in model.T)
+
+	transmission_sell_power=sum(
+		model.u_ts[t] for t in model.T)
 
 	demand_power=sum(
 		inputs['y_e'][t] for t in model.T)
 
 	model.coe=pyomo.Constraint(
-		expr=generation_power-pumping_power+transmission_power-demand_power==0)
+		expr=(generation_power-pumping_power+
+			transmission_purchase_power-
+			transmission_sell_power-
+			demand_power==0))
 
 	return model
 
@@ -118,19 +127,13 @@ def CHRP_Unit_Commitment(model,inputs):
 
 def CHRP_Variables(model,inputs):
 
-	# generator_lb=np.tile(inputs['f_g_min'],(inputs['M'],1))
-	# generator_ub=np.tile(inputs['f_g_max'],(inputs['M'],1))
-	# pump_lb=np.tile(inputs['f_p_min'],(inputs['M'],1))
-	# pump_ub=np.tile(inputs['f_p_max'],(inputs['M'],1))
-
 	model.R=pyomo.Set(initialize=[idx for idx in range(inputs['N'])])
 	model.T=pyomo.Set(initialize=[idx for idx in range(inputs['M'])])
 
 	model.u_g=pyomo.Var(model.R,model.T,domain=pyomo.NonNegativeReals)
-		# bounds=lambda m,r,t: (generator_lb[r,t],generator_ub[r,t]))
-
 	model.u_p=pyomo.Var(model.R,model.T,domain=pyomo.NonNegativeReals)
-	model.u_t=pyomo.Var(model.T,domain=pyomo.Reals,bounds=(0,inputs['t_max']))
+	model.u_tp=pyomo.Var(model.T,domain=pyomo.Reals,bounds=(0,inputs['tp_max']))
+	model.u_ts=pyomo.Var(model.T,domain=pyomo.Reals,bounds=(0,inputs['ts_max']))
 	model.u_gc=pyomo.Var(model.R,model.T,domain=pyomo.Boolean)
 	model.u_pc=pyomo.Var(model.R,model.T,domain=pyomo.Boolean)
 
