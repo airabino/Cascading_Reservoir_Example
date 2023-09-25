@@ -13,175 +13,341 @@ from scipy.stats import binom
 
 from .utilities import IsIterable,FullFact
 
-def BlendingProblemExample(volume,abv,data,solver_kwargs):
+def Solution(model):
+	'''
+	From StackOverflow
+	https://stackoverflow.com/questions/67491499/
+	how-to-extract-indexed-variable-information-in-pyomo-model-and-build-pandas-data
+	'''
+	model_vars=model.component_map(ctype=pyomo.Var)
 
-	#Pulling the keys from the data dict
-	keys=data.keys()
+	serieses=[]   # collection to hold the converted "serieses"
+	for k in model_vars.keys():   # this is a map of {name:pyo.Var}
+		v=model_vars[k]
 
-	#Initializing the model as a concrete model (as in one that has fixed inputted values)
-	model=pyomo.ConcreteModel()
+		# make a pd.Series from each    
+		s=pd.Series(v.extract_values(),index=v.extract_values().keys())
 
-	#Adding the variables for optimization
-	model.x=pyomo.Var(keys,domain=pyomo.NonNegativeReals)
+		# if the series is multi-indexed we need to unstack it...
+		if type(s.index[0])==tuple:# it is multi-indexed
+			s=s.unstack(level=1)
+		else:
+			s=pd.DataFrame(s) # force transition from Series -> df
 
-	#Adding the objective function
-	model.cost=pyomo.Objective(expr=sum(model.x[c]*data[c]['cost'] for c in keys))
+		# multi-index the columns
+		s.columns=pd.MultiIndex.from_tuples([(k,t) for t in s.columns])
 
-	#Adding constraints on volume and abv targets
-	model.volume=pyomo.Constraint(expr=volume==sum(model.x[c] for c in keys))
-	model.abv=pyomo.Constraint(expr=0==sum(model.x[c]*(data[c]['abv']-abv) for c in keys))
+		serieses.append(s)
 
-	#Initializing the solver
-	solver=pyomo.SolverFactory(**solver_kwargs)
+	df=pd.concat(serieses,axis=1)
 
-	#Solving the model
-	solver.solve(model)
+	return df
 
-	return model
+class CHRP():
 
-def CHRP_Objective(model,inputs):
+	def __init__(self,inputs={}):
 
-	generation_cost=sum(
-		inputs['c_g'][r,t]*model.u_g[r,t] for r in model.R for t in model.T)
+		self.inputs=inputs
 
-	pumping_cost=sum(
-		inputs['c_p'][r,t]*model.u_p[r,t] for r in model.R for t in model.T)
+		if self.inputs:
 
-	transmission_purchase_cost=sum(
-		inputs['c_tp'][t]*model.u_tp[t] for t in model.T)
+			self.Build()
 
-	transmission_sell_cost=sum(
-		inputs['c_ts'][t]*model.u_ts[t] for t in model.T)
+	def Solve(self,solver_kwargs={}):
 
-	model.objective=pyomo.Objective(
-		expr=generation_cost+pumping_cost+transmission_purchase_cost+transmission_sell_cost)
+		solver=pyomo.SolverFactory(**solver_kwargs)
+		solver.solve(self.model)
 
-	return model
+		self.solution=Solution(self.model)
 
-def CHRP_COE(model,inputs):
+	def Build(self):
 
-	generation_power=sum(
-		model.u_g[r,t] for r in model.R for t in model.T)
+		#Pulling the keys from the inputs dict
+		keys=self.inputs.keys()
 
-	pumping_power=sum(
-		model.u_g[r,t] for r in model.R for t in model.T)
+		#Initializing the model as a concrete model (as in one that has fixed inputted values)
+		self.model=pyomo.ConcreteModel()
 
-	transmission_purchase_power=sum(
-		model.u_tp[t] for t in model.T)
+		#Adding variables
+		self.Variables()
 
-	transmission_sell_power=sum(
-		model.u_ts[t] for t in model.T)
+		#Adding the objective function
+		self.Objective()
 
-	demand_power=sum(
-		inputs['y_e'][t] for t in model.T)
+		#Conservation of energy constraint
+		self.Conservation_of_Energy()
 
-	model.coe=pyomo.Constraint(
-		expr=(generation_power-pumping_power+
-			transmission_purchase_power-
-			transmission_sell_power-
-			demand_power==0))
+		#Bounds constraints
+		self.Bounds()
 
-	return model
+		#Unit commitment constraints
+		self.Unit_Commitment()
 
-def CHRP_Bounds(model,inputs):
+	def Variables(self):
 
-	model.bounds=pyomo.ConstraintList()
-	model.fs=pyomo.ConstraintList()
+		self.model.T=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_t'])])
+		self.model.R=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_r'])])
 
-	for r in range(inputs['N']):
-		level=inputs['is'][r]
+		self.model.u_g=pyomo.Var(self.model.T,self.model.R,domain=pyomo.NonNegativeReals)
 
-		for t in range(inputs['M']):
+		self.model.u_p=pyomo.Var(self.model.T,self.model.R,domain=pyomo.NonNegativeReals)
 
-			level+=(
-				model.u_p[r,t]-
-				model.u_g[r,t]+
-				inputs['y_f'][r,t])
+		self.model.u_tp=pyomo.Var(self.model.T,domain=pyomo.Reals,
+			bounds=(0,self.inputs['tp_max']))
 
-			model.bounds.add((inputs['lb'][r],level,inputs['ub'][r]))
+		self.model.u_ts=pyomo.Var(self.model.T,domain=pyomo.Reals,
+			bounds=(0,self.inputs['ts_max']))
 
-		model.fs.add(expr=level==inputs['fs'][r])
+		self.model.u_gc=pyomo.Var(self.model.T,self.model.R,domain=pyomo.Boolean)
 
-	return model
+		self.model.u_pc=pyomo.Var(self.model.T,self.model.R,domain=pyomo.Boolean)
 
-def CHRP_Unit_Commitment(model,inputs):
+	def Objective(self):
 
-	model.unit_commitment=pyomo.ConstraintList()
+		transmission_purchase_cost=sum(
+			self.inputs['c_tp'][t]*self.model.u_tp[t] for t in self.model.T)
 
-	for r in range(inputs['N']):
-		for t in range(inputs['M']):
+		transmission_sell_cost=sum(
+			self.inputs['c_ts'][t]*self.model.u_ts[t] for t in self.model.T)
 
-			model.unit_commitment.add(
-				expr=inputs['f_g_min'][r]*model.u_gc[r,t]-model.u_g[r,t]<=0)
-			
-			model.unit_commitment.add(
-				expr=inputs['f_g_max'][r]*model.u_gc[r,t]-model.u_g[r,t]>=0)
+		self.model.objective=pyomo.Objective(
+			expr=transmission_purchase_cost+transmission_sell_cost)
 
-			model.unit_commitment.add(
-				expr=inputs['f_p_min'][r]*model.u_pc[r,t]-model.u_p[r,t]<=0)
-			
-			model.unit_commitment.add(
-				expr=inputs['f_p_max'][r]*model.u_pc[r,t]-model.u_p[r,t]>=0)
+	def Conservation_of_Energy(self):
 
-	return model
+		self.model.coe=pyomo.ConstraintList()
 
-def CHRP_Variables(model,inputs):
+		for t in self.model.T:
 
-	model.R=pyomo.Set(initialize=[idx for idx in range(inputs['N'])])
-	model.T=pyomo.Set(initialize=[idx for idx in range(inputs['M'])])
+			generation_power=sum(
+				self.model.u_g[t,r] for r in self.model.R)
 
-	model.u_g=pyomo.Var(model.R,model.T,domain=pyomo.NonNegativeReals)
-	model.u_p=pyomo.Var(model.R,model.T,domain=pyomo.NonNegativeReals)
-	model.u_tp=pyomo.Var(model.T,domain=pyomo.Reals,bounds=(0,inputs['tp_max']))
-	model.u_ts=pyomo.Var(model.T,domain=pyomo.Reals,bounds=(0,inputs['ts_max']))
-	model.u_gc=pyomo.Var(model.R,model.T,domain=pyomo.Boolean)
-	model.u_pc=pyomo.Var(model.R,model.T,domain=pyomo.Boolean)
+			pumping_power=sum(
+				self.model.u_p[t,r] for r in self.model.R)
 
-	return model
+			transmission_purchase_power=self.model.u_tp[t]
 
-def CHRP(inputs):
+			transmission_sell_power=self.model.u_ts[t]
 
-	#Pulling the keys from the inputs dict
-	keys=inputs.keys()
+			demand_power=self.inputs['y_e'][t]
 
-	#Initializing the model as a concrete model (as in one that has fixed inputted values)
-	model=pyomo.ConcreteModel()
+			self.model.coe.add(
+				expr=(generation_power-pumping_power+
+					transmission_purchase_power-
+					transmission_sell_power-
+					demand_power==0))
 
-	#Adding variables
-	model=CHRP_Variables(model,inputs)
+	def Bounds(self):
 
-	#Adding the objective function
-	model=CHRP_Objective(model,inputs)
+		self.model.bounds=pyomo.ConstraintList()
+		self.model.fs=pyomo.ConstraintList()
 
-	#Conservation of energy constraint
-	model=CHRP_COE(model,inputs)
+		for r in range(self.inputs['n_r']):
+			level=self.inputs['is'][r]
 
-	#Bounds constraints
-	model=CHRP_Bounds(model,inputs)
+			for t in range(self.inputs['n_t']):
 
-	#Unit commitment constraints
-	model=CHRP_Unit_Commitment(model,inputs)
+				level+=(
+					self.model.u_p[t,r]-
+					self.model.u_g[t,r]+
+					self.inputs['y_f'][t,r])
 
-	return model
+				self.model.bounds.add((self.inputs['lb'][r],level,self.inputs['ub'][r]))
 
-def unit_commitment():
-    m = pyomo.ConcreteModel()
+			self.model.fs.add(expr=level==self.inputs['fs'][r])
 
-    m.N = pyomo.Set(initialize=N)
-    m.T = pyomo.Set(initialize=T)
+	def Unit_Commitment(self):
 
-    m.x = pyomo.Var(m.N, m.T, bounds = (0, pmax))
-    m.u = pyomo.Var(m.N, m.T, domain=pyo.Binary)
-    
-    # objective
-    m.cost = pyomo.Objective(
-    	expr = sum(m.x[n,t]*a[n] * m.u[n,t]*b[n] for t in m.T for n in m.N),
-    	sense=pyo.minimize)
-    
-    # demand
-    m.demand = pyomo.Constraint(m.T, rule=lambda m, t: sum(m.x[n,t] for n in N) == d[t])
-    
-    # semi-continuous
-    m.lb = pyomo.Constraint(m.N, m.T, rule=lambda m, n, t: pmin*m.u[n,t] <= m.x[n,t])
-    m.ub = pyomo.Constraint(m.N, m.T, rule=lambda m, n, t: pmax*m.u[n,t] >= m.x[n,t])
-    return m
+		self.model.unit_commitment=pyomo.ConstraintList()
+
+		for r in range(self.inputs['n_r']):
+			for t in range(self.inputs['n_t']):
+
+				self.model.unit_commitment.add(
+					expr=(self.inputs['f_g_min'][r]*self.model.u_gc[t,r]-
+						self.model.u_g[t,r]<=0))
+				
+				self.model.unit_commitment.add(
+					expr=(self.inputs['f_g_max'][r]*self.model.u_gc[t,r]-
+						self.model.u_g[t,r]>=0))
+
+				self.model.unit_commitment.add(
+					expr=(self.inputs['f_p_min'][r]*self.model.u_pc[t,r]-
+						self.model.u_p[t,r]<=0))
+				
+				self.model.unit_commitment.add(
+					expr=(self.inputs['f_p_max'][r]*self.model.u_pc[t,r]-
+						self.model.u_p[t,r]>=0))
+
+class SCHRP():
+
+	def __init__(self,inputs={}):
+
+		self.inputs=inputs
+
+		if self.inputs:
+
+			self.Build()
+
+	def Solve(self,solver_kwargs={}):
+
+		solver=pyomo.SolverFactory(**solver_kwargs)
+		solver.solve(self.model)
+
+		# self.solution=Solution(self.model)
+
+	def Build(self):
+
+		#Pulling the keys from the inputs dict
+		keys=self.inputs.keys()
+
+		#Initializing the model as a concrete model (as in one that has fixed inputted values)
+		self.model=pyomo.ConcreteModel()
+
+		#Adding variables
+		self.Variables()
+
+		#Adding the objective function
+		self.Objective()
+
+		#Conservation of energy constraint
+		self.Conservation_of_Energy()
+
+		#Bounds constraints
+		self.Bounds()
+
+		#Unit commitment constraints
+		self.Unit_Commitment()
+
+	def Variables(self):
+
+		#Index sets
+		self.model.T=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_t'])])
+		self.model.R=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_r'])])
+		self.model.S=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_s'])])
+
+		#Specific variables
+		self.model.u_g=pyomo.Var(self.model.T,self.model.R,self.model.S,
+			domain=pyomo.NonNegativeReals)
+
+		self.model.u_p=pyomo.Var(self.model.T,self.model.R,self.model.S,
+			domain=pyomo.NonNegativeReals)
+
+		self.model.u_gc=pyomo.Var(self.model.T,self.model.R,self.model.S,
+			domain=pyomo.Boolean)
+
+		self.model.u_pc=pyomo.Var(self.model.T,self.model.R,self.model.S,
+			domain=pyomo.Boolean)
+
+		self.model.u_tpd=pyomo.Var(self.model.T,self.model.S,
+			domain=pyomo.Reals,
+			bounds=(0,self.inputs['tpd_max']))
+
+		self.model.u_tsd=pyomo.Var(self.model.T,self.model.S,
+			domain=pyomo.Reals,
+			bounds=(0,self.inputs['tsd_max']))
+
+		#General variables
+		self.model.u_tp=pyomo.Var(self.model.T,
+			domain=pyomo.Reals,
+			bounds=(0,self.inputs['tp_max']))
+
+		self.model.u_ts=pyomo.Var(self.model.T,
+			domain=pyomo.Reals,
+			bounds=(0,self.inputs['ts_max']))
+
+	def Objective(self):
+
+		transmission_purchase_cost=0
+		transmission_sell_cost=0
+		transmission_purchase_deviation_cost=0
+		transmission_sell_deviation_cost=0
+
+		for t in range(self.inputs['n_t']):
+
+			transmission_purchase_cost+=self.inputs['c_tp'][t]*self.model.u_tp[t]
+			transmission_sell_cost+=self.inputs['c_ts'][t]*self.model.u_ts[t]
+
+			for s in range(self.inputs['n_s']):
+
+				transmission_purchase_deviation_cost+=(
+					self.inputs['p_s'][s]*self.inputs['c_tpd'][t]*self.model.u_tpd[t,s])
+
+				transmission_sell_deviation_cost+=(
+					self.inputs['p_s'][s]*self.inputs['c_tsd'][t]*self.model.u_tsd[t,s])
+
+		self.model.objective=pyomo.Objective(
+			expr=transmission_purchase_cost+transmission_sell_cost+\
+			transmission_purchase_deviation_cost+transmission_sell_deviation_cost)
+
+	def Conservation_of_Energy(self):
+
+		self.model.coe=pyomo.ConstraintList()
+
+		for t in self.model.T:
+
+			for s in self.model.S:
+
+				generation_power=sum(
+					self.model.u_g[t,r,s] for r in self.model.R)
+
+				pumping_power=sum(
+					self.model.u_p[t,r,s] for r in self.model.R)
+
+				transmission_purchase_power=self.model.u_tp[t]+self.model.u_tpd[t,s]
+
+				transmission_sell_power=self.model.u_ts[t]+self.model.u_tsd[t,s]
+
+				demand_power=self.inputs['y_e'][t,s]
+
+				self.model.coe.add(
+					expr=(generation_power-pumping_power+
+						transmission_purchase_power-
+						transmission_sell_power-
+						demand_power==0))
+
+	def Bounds(self):
+
+		self.model.bounds=pyomo.ConstraintList()
+		self.model.fs=pyomo.ConstraintList()
+
+		for s in range(self.inputs['n_s']):
+
+			for r in range(self.inputs['n_r']):
+				level=self.inputs['is'][r]
+
+				for t in range(self.inputs['n_t']):
+
+					level+=(
+						self.model.u_p[t,r,s]-
+						self.model.u_g[t,r,s]+
+						self.inputs['y_f'][t,r,s])
+
+					self.model.bounds.add(
+						(self.inputs['lb'][r],level,self.inputs['ub'][r]))
+
+				self.model.fs.add(expr=level==self.inputs['fs'][r])
+
+	def Unit_Commitment(self):
+
+		self.model.unit_commitment=pyomo.ConstraintList()
+
+		for s in range(self.inputs['n_s']):
+			for r in range(self.inputs['n_r']):
+				for t in range(self.inputs['n_t']):
+
+					self.model.unit_commitment.add(
+						expr=(self.inputs['f_g_min'][r]*self.model.u_gc[t,r,s]-
+							self.model.u_g[t,r,s]<=0))
+					
+					self.model.unit_commitment.add(
+						expr=(self.inputs['f_g_max'][r]*self.model.u_gc[t,r,s]-
+							self.model.u_g[t,r,s]>=0))
+
+					self.model.unit_commitment.add(
+						expr=(self.inputs['f_p_min'][r]*self.model.u_pc[t,r,s]-
+							self.model.u_p[t,r,s]<=0))
+					
+					self.model.unit_commitment.add(
+						expr=(self.inputs['f_p_max'][r]*self.model.u_pc[t,r,s]-
+							self.model.u_p[t,r,s]>=0))
